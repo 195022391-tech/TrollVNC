@@ -76,6 +76,9 @@ static BOOL gClipboardEnabled = YES;
 static BOOL gIsDaemonMode = NO; // set when launched with -daemon
 
 static double gScale = 1.0; // 0 < scale <= 1.0, 1.0 = no scaling
+static double gPreviewScale = 0.4; // wall preview, relative to the captured frame
+static int gPreviewFps = 20;
+static std::atomic<int> gPreviewResize(0); // PC sent a new scale; apply on the capture thread
 // Preferred frame rate range (0 = unspecified)
 static int gFpsMin = 0;
 static int gFpsPref = 0;
@@ -519,6 +522,25 @@ static void parseDaemonOptions(void) {
         if (v > 1.0)
             v = 1.0;
         gScale = v;
+    }
+
+    NSNumber *previewScaleN = [prefs objectForKey:@"PreviewScale"];
+    if ([previewScaleN isKindOfClass:[NSNumber class]]) {
+        double v = previewScaleN.doubleValue;
+        if (v < 0.1)
+            v = 0.1;
+        if (v > 1.0)
+            v = 1.0;
+        gPreviewScale = v;
+    }
+    NSNumber *previewFpsN = [prefs objectForKey:@"PreviewFps"];
+    if ([previewFpsN isKindOfClass:[NSNumber class]]) {
+        int v = previewFpsN.intValue;
+        if (v < 5)
+            v = 5;
+        if (v > 60)
+            v = 60;
+        gPreviewFps = v;
     }
 
     NSNumber *wheelPxN = [prefs objectForKey:@"WheelStepPx"];
@@ -1417,6 +1439,16 @@ static int gBytesPerPixel = 4; // ARGB/BGRA 32-bit
 static void *gFrontBuffer = NULL; // Exposed to VNC clients via gScreen->frameBuffer
 static void *gBackBuffer = NULL;  // We render into this and then swap
 
+// Second listener for wall thumbnails: same capture, long edge 480, about 20 fps.
+static rfbScreenInfoPtr gPreviewScreen = NULL;
+static void *gPreviewBuffer = NULL;
+static int gPreviewW = 0;
+static int gPreviewH = 0;
+static CFAbsoluteTime gPreviewSentAt = 0;
+static BOOL gPreviewLoopStarted = NO;
+static void tvPreviewEnsure(void);
+static void tvPreviewPublish(void);
+
 static int setDesktopSizeHook(int width, int height, int numScreens, rfbExtDesktopScreen *extDesktopScreens,
                               rfbClientPtr cl) {
     (void)cl;
@@ -1453,6 +1485,8 @@ NS_INLINE void alignDimensions(int rawW, int rawH, int *alignedW, int *alignedH)
     *alignedW = w4;
     *alignedH = hAdj;
 }
+
+static void tvPreviewEnsure(void);
 
 // Resize framebuffer according to rotation (0/180 keep WxH from src, 90/270 swap), then apply scale
 NS_INLINE void maybeResizeFramebufferForRotation(int rotQ) {
@@ -1513,6 +1547,7 @@ NS_INLINE void maybeResizeFramebufferForRotation(int rotQ) {
         gScreen->frameBuffer = (char *)gFrontBuffer;
 
     TVLog(@"Resize: framebuffer changed to %dx%d (rotQ=%d, scale=%.3f)", gWidth, gHeight, rotQ, gScale);
+    tvPreviewEnsure();
 }
 
 // Ensure scratch buffer for rotation is available and large enough
@@ -1669,6 +1704,8 @@ static void handleFramebuffer(CMSampleBufferRef sampleBuffer) {
 #endif
 
     maybeResizeFramebufferForRotation(rotQ);
+    if (gPreviewResize.exchange(0, std::memory_order_relaxed))
+        tvPreviewEnsure();
 
 #if DEBUG
     CFAbsoluteTime __tv_tResize1 = CFAbsoluteTimeGetCurrent();
@@ -1859,6 +1896,7 @@ static void handleFramebuffer(CMSampleBufferRef sampleBuffer) {
     lockAllClientsBlocking();
     swapBuffers();
     rfbMarkRectAsModified(gScreen, 0, 0, gWidth, gHeight);
+    tvPreviewPublish();
     unlockAllClientsBlocking();
 
 #if DEBUG
@@ -3254,10 +3292,89 @@ static enum rfbNewClientAction newClientHook(rfbClientPtr cl) {
 
 static std::atomic<int> gClipboardSuppressSend(0); // >0 means suppress sending clipboard to clients
 
+// PC sends "TVNC1 scale=1.00 fps=30 pscale=0.40 pfps=20" as client cut text.
+// Returns YES when the text is a config line (do not paste it).
+static BOOL tvApplyRemoteConfig(const char *str, int len) {
+    if (!str || len < 6 || len > 240 || memcmp(str, "TVNC1 ", 6) != 0)
+        return NO;
+
+    double scale = gScale, pscale = gPreviewScale;
+    int fps = gFpsPref > 0 ? gFpsPref : 60;
+    int pfps = gPreviewFps;
+    const char *p = str + 6;
+    const char *end = str + len;
+    while (p < end) {
+        while (p < end && (*p == ' ' || *p == '\t'))
+            p++;
+        if (p >= end)
+            break;
+        const char *key = p;
+        while (p < end && *p != '=' && *p != ' ')
+            p++;
+        int klen = (int)(p - key);
+        if (p >= end || *p != '=')
+            break;
+        p++;
+        char *ep = NULL;
+        double num = strtod(p, &ep);
+        if (ep == p)
+            break;
+        p = ep;
+        if (klen == 5 && memcmp(key, "scale", 5) == 0)
+            scale = num;
+        else if (klen == 3 && memcmp(key, "fps", 3) == 0)
+            fps = (int)num;
+        else if (klen == 6 && memcmp(key, "pscale", 6) == 0)
+            pscale = num;
+        else if (klen == 4 && memcmp(key, "pfps", 4) == 0)
+            pfps = (int)num;
+    }
+    if (scale < 0.1)
+        scale = 0.1;
+    if (scale > 1.0)
+        scale = 1.0;
+    if (pscale < 0.1)
+        pscale = 0.1;
+    if (pscale > 1.0)
+        pscale = 1.0;
+    if (fps < 5)
+        fps = 5;
+    if (fps > 60)
+        fps = 60;
+    if (pfps < 5)
+        pfps = 5;
+    if (pfps > 60)
+        pfps = 60;
+
+    BOOL scaleChanged = (scale > gScale ? scale - gScale : gScale - scale) > 0.001;
+    BOOL pscaleChanged = (pscale > gPreviewScale ? pscale - gPreviewScale : gPreviewScale - pscale) > 0.001;
+    BOOL fpsChanged = fps != gFpsMin || fps != gFpsPref || fps != gFpsMax;
+    BOOL pfpsChanged = pfps != gPreviewFps;
+    if (!scaleChanged && !pscaleChanged && !fpsChanged && !pfpsChanged)
+        return YES;
+
+    gScale = scale;
+    gPreviewScale = pscale;
+    gPreviewFps = pfps;
+    gFpsMin = fps;
+    gFpsPref = fps;
+    gFpsMax = fps;
+    if (fpsChanged)
+        [[ScreenCapturer sharedCapturer] setPreferredFrameRateWithMin:fps preferred:fps max:fps];
+    if (scaleChanged || pscaleChanged)
+        gPreviewResize.store(1, std::memory_order_relaxed);
+    TVLog(@"PC config: scale=%.2f fps=%d previewScale=%.2f previewFps=%d", gScale, fps, gPreviewScale, gPreviewFps);
+    return YES;
+}
+
 static void setXCutTextLatin1(char *str, int len, rfbClientPtr cl) {
     (void)cl;
     if (!str || len < 0)
         len = 0;
+    if (tvApplyRemoteConfig(str, len))
+        return;
+    if (!gClipboardEnabled)
+        return;
 
     TVLog(@"Clipboard: received client cut text (Latin-1) len=%d", len);
     NSData *data = [NSData dataWithBytes:str length:(NSUInteger)len];
@@ -3282,6 +3399,10 @@ static void setXCutTextUTF8(char *str, int len, rfbClientPtr cl) {
         len = 0;
 
     TVLog(@"Clipboard: received client cut text (UTF-8) len=%d", len);
+    if (tvApplyRemoteConfig(str, len))
+        return;
+    if (!gClipboardEnabled)
+        return;
 
     NSData *data = [NSData dataWithBytes:str length:(NSUInteger)len];
     NSString *s = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
@@ -3748,14 +3869,9 @@ static void setupRfbClassicAuthentication(void) {
 }
 
 static void setupRfbCutTextHandlers(void) {
-    // client->server sync
-    if (gClipboardEnabled) {
-        gScreen->setXCutText = setXCutTextLatin1;
-        gScreen->setXCutTextUTF8 = setXCutTextUTF8;
-        TVLog(@"Clipboard: client->server handlers registered (enabled)");
-    } else {
-        TVLog(@"Clipboard: client->server handlers not registered (disabled)");
-    }
+    // Always registered so a PC can push scale/fps even when clipboard sync is off.
+    gScreen->setXCutText = setXCutTextLatin1;
+    gScreen->setXCutTextUTF8 = setXCutTextUTF8;
 }
 
 static void setupRfbServerSideCursor(void) {
@@ -3869,9 +3985,139 @@ static void tvStopRfbEventThread(void) {
     }
 }
 
+static enum rfbNewClientAction previewNewClientHook(rfbClientPtr cl) {
+    cl->viewOnly = TRUE;
+    return RFB_CLIENT_ACCEPT;
+}
+
+static void tvPreviewDimensions(int srcW, int srcH, int *outW, int *outH) {
+    // src is the main framebuffer (already at gScale). Preview scale is vs the capture.
+    double mainScale = (gScale > 0.05 && gScale <= 1.0) ? gScale : 1.0;
+    double rel = gPreviewScale / mainScale;
+    if (rel > 1.0)
+        rel = 1.0;
+    if (rel < 0.05)
+        rel = 0.05;
+    int w = MAX(1, (int)floor((double)MAX(1, srcW) * rel));
+    int h = MAX(1, (int)floor((double)MAX(1, srcH) * rel));
+    alignDimensions(w, h, outW, outH);
+}
+
+static void tvPreviewEnsure(void) {
+    if (gPort <= 0 || !gScreen || gWidth < 2 || gHeight < 2)
+        return;
+
+    int pw = 0, ph = 0;
+    tvPreviewDimensions(gWidth, gHeight, &pw, &ph);
+    if (gPreviewScreen && pw == gPreviewW && ph == gPreviewH)
+        return;
+
+    size_t nbytes = (size_t)pw * (size_t)ph * (size_t)gBytesPerPixel;
+    void *buf = calloc(1, nbytes);
+    if (!buf) {
+        TVPrintError("Failed to allocate preview framebuffer");
+        return;
+    }
+
+    if (!gPreviewScreen) {
+        int argc = 1;
+        char arg0[] = "trollvnc-preview";
+        char *argvStore[] = {arg0, NULL};
+        char **argv = argvStore;
+        gPreviewScreen = rfbGetScreen(&argc, argv, pw, ph, 8, 3, gBytesPerPixel);
+        if (!gPreviewScreen) {
+            free(buf);
+            TVPrintError("Failed to create preview VNC screen");
+            return;
+        }
+        NSString *previewName = [gDesktopName stringByAppendingString:@" preview"];
+        gPreviewScreen->desktopName = strdup([previewName UTF8String]);
+        gPreviewScreen->port = gPort + 1;
+        gPreviewScreen->ipv6port = gPort + 1;
+        gPreviewScreen->listenInterface = gScreen->listenInterface;
+        if (gScreen->listen6Interface)
+            gPreviewScreen->listen6Interface = strdup(gScreen->listen6Interface);
+        gPreviewScreen->newClientHook = previewNewClientHook;
+        gPreviewScreen->setXCutText = setXCutTextLatin1;
+        gPreviewScreen->setXCutTextUTF8 = setXCutTextUTF8;
+        gPreviewScreen->alwaysShared = TRUE;
+        gPreviewScreen->httpPort = 0;
+        gPreviewScreen->http6Port = 0;
+        gPreviewScreen->httpDir = NULL;
+        if (gScreen->authPasswdData) {
+            gPreviewScreen->authPasswdData = gScreen->authPasswdData;
+            gPreviewScreen->passwordCheck = gScreen->passwordCheck;
+            gPreviewScreen->authPasswdFirstViewOnly = gScreen->authPasswdFirstViewOnly;
+        }
+        char *stock = gPreviewScreen->frameBuffer;
+        gPreviewScreen->frameBuffer = (char *)buf;
+        if (stock && stock != (char *)buf)
+            free(stock);
+        gPreviewScreen->paddedWidthInBytes = pw * gBytesPerPixel;
+        gPreviewScreen->serverFormat.redShift = 16;
+        gPreviewScreen->serverFormat.greenShift = 8;
+        gPreviewScreen->serverFormat.blueShift = 0;
+        rfbInitServer(gPreviewScreen);
+        if (!gPreviewLoopStarted) {
+            rfbRunEventLoop(gPreviewScreen, cSelectTimeout, TRUE);
+            gPreviewLoopStarted = YES;
+        }
+        TVLog(@"Preview VNC listening on port %d, %dx%d", gPort + 1, pw, ph);
+    } else {
+        rfbNewFramebuffer(gPreviewScreen, (char *)buf, pw, ph, 8, 3, gBytesPerPixel);
+        gPreviewScreen->paddedWidthInBytes = pw * gBytesPerPixel;
+        gPreviewScreen->serverFormat.redShift = 16;
+        gPreviewScreen->serverFormat.greenShift = 8;
+        gPreviewScreen->serverFormat.blueShift = 0;
+        if (gPreviewBuffer && gPreviewBuffer != buf)
+            free(gPreviewBuffer);
+        TVLog(@"Preview framebuffer resized to %dx%d", pw, ph);
+    }
+
+    gPreviewBuffer = buf;
+    gPreviewW = pw;
+    gPreviewH = ph;
+    gPreviewScreen->frameBuffer = (char *)gPreviewBuffer;
+}
+
+static void tvPreviewPublish(void) {
+    if (!gPreviewScreen || !gPreviewBuffer || !gFrontBuffer || gPreviewW < 2 || gPreviewH < 2)
+        return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    double minDt = 1.0 / (double)(gPreviewFps > 0 ? gPreviewFps : 20);
+    if (gPreviewSentAt != 0 && (now - gPreviewSentAt) < minDt)
+        return;
+    gPreviewSentAt = now;
+
+    vImage_Buffer src = {.data = gFrontBuffer,
+                         .width = (vImagePixelCount)gWidth,
+                         .height = (vImagePixelCount)gHeight,
+                         .rowBytes = (size_t)gWidth * (size_t)gBytesPerPixel};
+    vImage_Buffer dst = {.data = gPreviewBuffer,
+                         .width = (vImagePixelCount)gPreviewW,
+                         .height = (vImagePixelCount)gPreviewH,
+                         .rowBytes = (size_t)gPreviewW * (size_t)gBytesPerPixel};
+    if (vImageScale_ARGB8888(&src, &dst, NULL, kvImageNoFlags) != kvImageNoError)
+        return;
+
+    rfbClientIteratorPtr it = rfbGetClientIterator(gPreviewScreen);
+    rfbClientPtr cl;
+    while ((cl = rfbClientIteratorNext(it)))
+        pthread_mutex_lock(&cl->sendMutex);
+    rfbReleaseClientIterator(it);
+
+    rfbMarkRectAsModified(gPreviewScreen, 0, 0, gPreviewW, gPreviewH);
+
+    it = rfbGetClientIterator(gPreviewScreen);
+    while ((cl = rfbClientIteratorNext(it)))
+        pthread_mutex_unlock(&cl->sendMutex);
+    rfbReleaseClientIterator(it);
+}
+
 static void initializeAndRunRfbServer(void) {
     rfbInitServer(gScreen);
     TVLog(@"VNC server initialized on port %d, %dx%d, name '%@'", gPort, gWidth, gHeight, gDesktopName);
+    tvPreviewEnsure();
 
     if (isRepeaterEnabled()) {
         static CFTimeInterval sRetryInterval = 0.0;
@@ -4046,6 +4292,13 @@ static void cleanupAndExit(int code) {
 
     if (gFileTransferRegistered) {
         rfbUnregisterTightVNCFileTransferExtension();
+    }
+
+    if (gPreviewScreen) {
+        rfbShutdownServer(gPreviewScreen, YES);
+        rfbScreenCleanup(gPreviewScreen); // frees gPreviewBuffer
+        gPreviewScreen = NULL;
+        gPreviewBuffer = NULL;
     }
 
     if (gScreen) {

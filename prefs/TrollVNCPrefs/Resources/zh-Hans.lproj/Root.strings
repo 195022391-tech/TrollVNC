@@ -128,6 +128,14 @@
 
 "Output Scale" = "输出缩放";
 
+"Small Window" = "小窗";
+
+"Wall preview on port+1 only. Big window keeps Output Scale and Frame Rate above. Restart the service after changing." = "只影响小窗（端口+1）。大窗仍用上面的输出缩放和帧率。修改后请重启服务。";
+
+"Small Window Scale" = "小窗缩放";
+
+"Small Window Frame Rate" = "小窗帧率";
+
 "PEM-encoded private key path matching the certificate." = "与证书匹配的 PEM 编码私钥路径。";
 
 "PEM-encoded X.509 certificate path for TLS. Used by HTTP/WebSocket if both cert and key are set." = "用于 TLS 的 PEM 编码 X.509 证书路径。若同时设置证书与私钥，将使用安全 WebSockets。";

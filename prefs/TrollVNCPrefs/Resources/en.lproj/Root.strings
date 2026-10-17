@@ -128,6 +128,14 @@
 
 "Output Scale" = "Output Scale";
 
+"Small Window" = "Small Window";
+
+"Wall preview on port+1 only. Big window keeps Output Scale and Frame Rate above. Restart the service after changing." = "Wall preview on port+1 only. Big window keeps Output Scale and Frame Rate above. Restart the service after changing.";
+
+"Small Window Scale" = "Small Window Scale";
+
+"Small Window Frame Rate" = "Small Window Frame Rate";
+
 "PEM-encoded private key path matching the certificate." = "PEM-encoded private key path matching the certificate.";
 
 "PEM-encoded X.509 certificate path for TLS. Used by HTTP/WebSocket if both cert and key are set." = "PEM-encoded X.509 certificate path for TLS. Used by HTTP/WebSocket if both cert and key are set.";
