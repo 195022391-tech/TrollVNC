@@ -6,10 +6,10 @@
 
 | Port | Role |
 |------|------|
-| 5901 | Full control |
-| 5902 | Same picture, view-only. No second scale or fps. |
+| 5901 | Big window: Output Scale + Frame Rate (or PC 大窗 settings) |
+| 5902 | Small window: PreviewScale + PreviewFps (or PC 小窗 settings), view-only |
 
-Copied only while a client is connected to 5902. No client means no extra encode.
+Preview only encodes while someone is on 5902. Publish runs outside the main client lock.
 
 ## Build without a Mac
 

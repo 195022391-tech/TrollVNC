@@ -1896,8 +1896,9 @@ static void handleFramebuffer(CMSampleBufferRef sampleBuffer) {
     lockAllClientsBlocking();
     swapBuffers();
     rfbMarkRectAsModified(gScreen, 0, 0, gWidth, gHeight);
-    tvPreviewPublish();
     unlockAllClientsBlocking();
+    // Preview work outside the main-client lock or the big window stalls at a few fps.
+    tvPreviewPublish();
 
 #if DEBUG
     CFAbsoluteTime __tv_tEnd = CFAbsoluteTimeGetCurrent();
@@ -3991,9 +3992,16 @@ static enum rfbNewClientAction previewNewClientHook(rfbClientPtr cl) {
 }
 
 static void tvPreviewDimensions(int srcW, int srcH, int *outW, int *outH) {
-    // Same pixels as the big window. Port+1 is only a second listener.
-    *outW = MAX(1, srcW);
-    *outH = MAX(1, srcH);
+    // src is the main framebuffer (already at gScale). Preview scale is vs the capture.
+    double mainScale = (gScale > 0.05 && gScale <= 1.0) ? gScale : 1.0;
+    double rel = gPreviewScale / mainScale;
+    if (rel > 1.0)
+        rel = 1.0;
+    if (rel < 0.05)
+        rel = 0.05;
+    int w = MAX(1, (int)floor((double)MAX(1, srcW) * rel));
+    int h = MAX(1, (int)floor((double)MAX(1, srcH) * rel));
+    alignDimensions(w, h, outW, outH);
 }
 
 static void tvPreviewEnsure(void) {
@@ -4074,16 +4082,34 @@ static void tvPreviewEnsure(void) {
 }
 
 static void tvPreviewPublish(void) {
-    if (!gPreviewScreen || !gPreviewBuffer || !gFrontBuffer)
-        return;
-    if (gPreviewW != gWidth || gPreviewH != gHeight || gFBSize == 0)
+    if (!gPreviewScreen || !gPreviewBuffer || !gFrontBuffer || gPreviewW < 2 || gPreviewH < 2)
         return;
     rfbClientIteratorPtr it = rfbGetClientIterator(gPreviewScreen);
     rfbClientPtr cl = rfbClientIteratorNext(it);
     rfbReleaseClientIterator(it);
     if (!cl)
-        return; // nobody watching port+1; don't copy or encode
-    memcpy(gPreviewBuffer, gFrontBuffer, gFBSize);
+        return;
+
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    double minDt = 1.0 / (double)(gPreviewFps > 0 ? gPreviewFps : 20);
+    if (gPreviewSentAt != 0 && (now - gPreviewSentAt) < minDt)
+        return;
+    gPreviewSentAt = now;
+
+    if (gPreviewW == gWidth && gPreviewH == gHeight) {
+        memcpy(gPreviewBuffer, gFrontBuffer, gFBSize);
+    } else {
+        vImage_Buffer src = {.data = gFrontBuffer,
+                             .width = (vImagePixelCount)gWidth,
+                             .height = (vImagePixelCount)gHeight,
+                             .rowBytes = (size_t)gWidth * (size_t)gBytesPerPixel};
+        vImage_Buffer dst = {.data = gPreviewBuffer,
+                             .width = (vImagePixelCount)gPreviewW,
+                             .height = (vImagePixelCount)gPreviewH,
+                             .rowBytes = (size_t)gPreviewW * (size_t)gBytesPerPixel};
+        if (vImageScale_ARGB8888(&src, &dst, NULL, kvImageNoFlags) != kvImageNoError)
+            return;
+    }
     rfbMarkRectAsModified(gPreviewScreen, 0, 0, gPreviewW, gPreviewH);
 }
 
