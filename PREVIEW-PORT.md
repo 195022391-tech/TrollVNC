@@ -4,12 +4,12 @@
 
 `src/trollvncserver.mm` adds a second LibVNCServer listener on **main port + 1** (default **5902** when VNC is **5901**).
 
-| Port | Role | Size | FPS |
-|------|------|------|-----|
-| 5901 | Full control (unchanged) | phone scale setting | phone fps setting |
-| 5902 | View-only wall preview | **Small Window Scale** (default 0.4) | **Small Window Frame Rate** (default 20) |
+| Port | Role |
+|------|------|
+| 5901 | Full control |
+| 5902 | Same picture, view-only. No second scale or fps. |
 
-One capture; each publish also downscales into the preview framebuffer.
+Copied only while a client is connected to 5902. No client means no extra encode.
 
 ## Build without a Mac
 

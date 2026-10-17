@@ -311,56 +311,6 @@
 			<true/>
 		</dict>
 
-		<!-- Small window (preview port) -->
-		<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>label</key>
-			<string>Small Window</string>
-			<key>footerText</key>
-			<string>Wall preview on port+1 only. Big window keeps Output Scale and Frame Rate above. Restart the service after changing.</string>
-		</dict>
-		<dict>
-			<key>cellClass</key>
-			<string>TVNCSliderCell</string>
-			<key>defaults</key>
-			<string>com.82flex.trollvnc</string>
-			<key>key</key>
-			<string>PreviewScale</string>
-			<key>label</key>
-			<string>Small Window Scale</string>
-			<key>default</key>
-			<real>0.4</real>
-			<key>min</key>
-			<real>0.1</real>
-			<key>max</key>
-			<real>1.0</real>
-			<key>showValue</key>
-			<true/>
-			<key>format</key>
-			<string>%.2f</string>
-		</dict>
-		<dict>
-			<key>cellClass</key>
-			<string>TVNCSliderCell</string>
-			<key>defaults</key>
-			<string>com.82flex.trollvnc</string>
-			<key>key</key>
-			<string>PreviewFps</string>
-			<key>label</key>
-			<string>Small Window Frame Rate</string>
-			<key>default</key>
-			<real>20</real>
-			<key>min</key>
-			<real>5</real>
-			<key>max</key>
-			<real>60</real>
-			<key>showValue</key>
-			<true/>
-			<key>format</key>
-			<string>%.0f</string>
-		</dict>
-
 		<!-- Sync Orientation -->
 		<dict>
 			<key>cell</key>
