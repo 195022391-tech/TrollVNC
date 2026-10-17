@@ -36,6 +36,7 @@
 #import <pthread.h>
 #import <rfb/keysym.h>
 #import <rfb/rfb.h>
+#import <rfb/rfbregion.h>
 #import <string>
 #import <sys/socket.h>
 #import <sys/sysctl.h>
@@ -4006,26 +4007,48 @@ static void previewClientGoneHook(rfbClientPtr cl) {
     tvMaybeStopCapture();
 }
 
+static void tvDownsample(const uint8_t *src, int sw, int sh, uint8_t *dst, int dw, int dh);
+
 static enum rfbNewClientAction previewNewClientHook(rfbClientPtr cl) {
     cl->viewOnly = TRUE;
     cl->clientGoneHook = previewClientGoneHook;
     gPreviewClientCount++;
     TVLog(@"Preview client connected, preview clients=%d", gPreviewClientCount);
     tvEnsureCaptureRunning();
+    // Seed first frame so noVNC is not stuck on a black buffer.
+    if (gPreviewBuffer && gFrontBuffer && gPreviewW > 1 && gPreviewH > 1) {
+        if (gPreviewW == gWidth && gPreviewH == gHeight)
+            memcpy(gPreviewBuffer, gFrontBuffer, gFBSize);
+        else
+            tvDownsample((const uint8_t *)gFrontBuffer, gWidth, gHeight, (uint8_t *)gPreviewBuffer, gPreviewW,
+                         gPreviewH);
+        rfbMarkRectAsModified(gPreviewScreen, 0, 0, gPreviewW, gPreviewH);
+    }
     return RFB_CLIENT_ACCEPT;
 }
 
 static void tvPreviewDimensions(int srcW, int srcH, int *outW, int *outH) {
-    // src is the main framebuffer (already at gScale). Preview scale is vs the capture.
-    double mainScale = (gScale > 0.05 && gScale <= 1.0) ? gScale : 1.0;
-    double rel = gPreviewScale / mainScale;
+    // Fraction of the big-window framebuffer. 0.5 means half the width and height.
+    double rel = gPreviewScale;
     if (rel > 1.0)
         rel = 1.0;
-    if (rel < 0.05)
-        rel = 0.05;
+    if (rel < 0.1)
+        rel = 0.1;
     int w = MAX(1, (int)floor((double)MAX(1, srcW) * rel));
     int h = MAX(1, (int)floor((double)MAX(1, srcH) * rel));
     alignDimensions(w, h, outW, outH);
+}
+
+static void tvDownsample(const uint8_t *src, int sw, int sh, uint8_t *dst, int dw, int dh) {
+    for (int y = 0; y < dh; y++) {
+        int sy = y * sh / dh;
+        const uint8_t *srow = src + (size_t)sy * (size_t)sw * 4;
+        uint8_t *drow = dst + (size_t)y * (size_t)dw * 4;
+        for (int x = 0; x < dw; x++) {
+            int sx = x * sw / dw;
+            memcpy(drow + (size_t)x * 4, srow + (size_t)sx * 4, 4);
+        }
+    }
 }
 
 static void tvPreviewEnsure(void) {
@@ -4108,32 +4131,22 @@ static void tvPreviewEnsure(void) {
 static void tvPreviewPublish(void) {
     if (!gPreviewScreen || !gPreviewBuffer || !gFrontBuffer || gPreviewW < 2 || gPreviewH < 2)
         return;
-    rfbClientIteratorPtr it = rfbGetClientIterator(gPreviewScreen);
-    rfbClientPtr cl = rfbClientIteratorNext(it);
-    rfbReleaseClientIterator(it);
-    if (!cl)
+    if (gPreviewClientCount <= 0)
         return;
 
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    double minDt = 1.0 / (double)(gPreviewFps > 0 ? gPreviewFps : 20);
+    double minDt = 1.0 / (double)(gPreviewFps > 0 ? gPreviewFps : 15);
     if (gPreviewSentAt != 0 && (now - gPreviewSentAt) < minDt)
         return;
+    // Throttle first — never downsample every capture frame when the send lock is busy.
     gPreviewSentAt = now;
 
-    if (gPreviewW == gWidth && gPreviewH == gHeight) {
+    if (gPreviewW == gWidth && gPreviewH == gHeight)
         memcpy(gPreviewBuffer, gFrontBuffer, gFBSize);
-    } else {
-        vImage_Buffer src = {.data = gFrontBuffer,
-                             .width = (vImagePixelCount)gWidth,
-                             .height = (vImagePixelCount)gHeight,
-                             .rowBytes = (size_t)gWidth * (size_t)gBytesPerPixel};
-        vImage_Buffer dst = {.data = gPreviewBuffer,
-                             .width = (vImagePixelCount)gPreviewW,
-                             .height = (vImagePixelCount)gPreviewH,
-                             .rowBytes = (size_t)gPreviewW * (size_t)gBytesPerPixel};
-        if (vImageScale_ARGB8888(&src, &dst, NULL, kvImageNoFlags) != kvImageNoError)
-            return;
-    }
+    else
+        tvDownsample((const uint8_t *)gFrontBuffer, gWidth, gHeight, (uint8_t *)gPreviewBuffer, gPreviewW, gPreviewH);
+
+    // Outside the main-client lock. Mark dirty; the preview event loop sends it.
     rfbMarkRectAsModified(gPreviewScreen, 0, 0, gPreviewW, gPreviewH);
 }
 
