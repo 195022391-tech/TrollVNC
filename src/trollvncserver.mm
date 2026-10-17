@@ -3125,6 +3125,27 @@ static void tvPublishClientDisconnectedNotif(NSString *host) {
 #pragma mark - Client Handlers
 
 static BOOL gIsCaptureStarted = NO;
+static int gPreviewClientCount = 0;
+
+static void tvEnsureCaptureRunning(void) {
+    if (gIsCaptureStarted || !gFrameHandler)
+        return;
+    if (gClientCount <= 0 && gPreviewClientCount <= 0)
+        return;
+    gIsCaptureStarted = YES;
+    [[ScreenCapturer sharedCapturer] startCaptureWithFrameHandler:gFrameHandler];
+    TVLog(@"Screen capture started (main=%d preview=%d).", gClientCount, gPreviewClientCount);
+}
+
+static void tvMaybeStopCapture(void) {
+    if (!gIsCaptureStarted)
+        return;
+    if (gClientCount > 0 || gPreviewClientCount > 0)
+        return;
+    [[ScreenCapturer sharedCapturer] endCapture];
+    gIsCaptureStarted = NO;
+    TVLog(@"No clients remaining; screen capture stopped.");
+}
 static BOOL gIsClipboardStarted = NO;
 
 #if !TARGET_OS_SIMULATOR
@@ -3161,11 +3182,7 @@ static void clientGoneHook(rfbClientPtr cl) {
     NSString *host = (cl && cl->host) ? [NSString stringWithUTF8String:cl->host] : @"";
     TVLog(@"Client %@ disconnected, active clients=%d", host, gClientCount);
 
-    if (gIsCaptureStarted && gClientCount == 0) {
-        [[ScreenCapturer sharedCapturer] endCapture];
-        gIsCaptureStarted = NO;
-        TVLog(@"No clients remaining; screen capture stopped.");
-    }
+    tvMaybeStopCapture();
 
     if (gIsClipboardStarted && gClientCount == 0) {
         [[ClipboardManager sharedManager] stop];
@@ -3259,12 +3276,7 @@ static enum rfbNewClientAction newClientHook(rfbClientPtr cl) {
     // Notify client connected
     tvPublishClientConnectedNotif(host);
 
-    if (!gIsCaptureStarted && gClientCount > 0 && gFrameHandler) {
-        // Start capture when entering non-zero client population.
-        gIsCaptureStarted = YES;
-        [[ScreenCapturer sharedCapturer] startCaptureWithFrameHandler:gFrameHandler];
-        TVLog(@"Screen capture started (clients=%d).", gClientCount);
-    }
+    tvEnsureCaptureRunning();
 
     if (gClipboardEnabled && !gIsClipboardStarted && gClientCount > 0) {
         gIsClipboardStarted = YES;
@@ -3986,8 +3998,20 @@ static void tvStopRfbEventThread(void) {
     }
 }
 
+static void previewClientGoneHook(rfbClientPtr cl) {
+    (void)cl;
+    if (gPreviewClientCount > 0)
+        gPreviewClientCount--;
+    TVLog(@"Preview client gone, preview clients=%d main=%d", gPreviewClientCount, gClientCount);
+    tvMaybeStopCapture();
+}
+
 static enum rfbNewClientAction previewNewClientHook(rfbClientPtr cl) {
     cl->viewOnly = TRUE;
+    cl->clientGoneHook = previewClientGoneHook;
+    gPreviewClientCount++;
+    TVLog(@"Preview client connected, preview clients=%d", gPreviewClientCount);
+    tvEnsureCaptureRunning();
     return RFB_CLIENT_ACCEPT;
 }
 
