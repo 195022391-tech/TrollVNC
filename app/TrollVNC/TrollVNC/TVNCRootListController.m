@@ -166,6 +166,7 @@ NS_INLINE BOOL TVNCIsValidBindHostLiteral(NSString *host) {
 @property(nonatomic, strong) PSSpecifier *exportCertSpecifier;
 
 @property(nonatomic, copy) NSString *defaultFooterText;
+@property(nonatomic, strong) NSTimer *memoryTimer;
 
 @end
 
@@ -331,10 +332,29 @@ NS_INLINE BOOL TVNCIsValidBindHostLiteral(NSString *host) {
     });
 }
 
+- (void)reloadMemoryRow {
+    CFPreferencesAppSynchronize(CFSTR("com.82flex.trollvnc"));
+    PSSpecifier *spec = [self specifierForID:@"MemoryUsage"];
+    if (spec)
+        [self reloadSpecifier:spec animated:NO];
+}
+
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
 
     [self updateFirstGroupAndReload:YES];
+    [self.memoryTimer invalidate];
+    self.memoryTimer = [NSTimer scheduledTimerWithTimeInterval:2
+                                                         target:self
+                                                       selector:@selector(reloadMemoryRow)
+                                                       userInfo:nil
+                                                        repeats:YES];
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
+    [self.memoryTimer invalidate];
+    self.memoryTimer = nil;
 }
 
 - (void)showClients {

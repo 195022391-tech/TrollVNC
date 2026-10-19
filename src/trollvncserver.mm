@@ -22,6 +22,8 @@
 #import <Accelerate/Accelerate.h>
 #import <Foundation/Foundation.h>
 
+#import "LeaseGate.h"
+
 #import <arpa/inet.h>
 #import <atomic>
 #import <climits>
@@ -36,7 +38,6 @@
 #import <pthread.h>
 #import <rfb/keysym.h>
 #import <rfb/rfb.h>
-#import <rfb/rfbregion.h>
 #import <string>
 #import <sys/socket.h>
 #import <sys/sysctl.h>
@@ -70,16 +71,13 @@ static BOOL gEnabled = YES;
 static int gPort = 5901;
 static int gTvCtlPort = 0;        // port for control connections (0 = disabled)
 static NSString *gBindHost = nil; // optional bind address from CLI/config
-static NSString *gDesktopName = @"TrollVNC";
+static NSString *gDesktopName = @"IOS 云控基座";
 static BOOL gViewOnly = NO;
 static double gKeepAliveSec = 0.0; // 15..86400
 static BOOL gClipboardEnabled = YES;
 static BOOL gIsDaemonMode = NO; // set when launched with -daemon
 
 static double gScale = 1.0; // 0 < scale <= 1.0, 1.0 = no scaling
-static double gPreviewScale = 0.4; // wall preview, relative to the captured frame
-static int gPreviewFps = 20;
-static std::atomic<int> gPreviewResize(0); // PC sent a new scale; apply on the capture thread
 // Preferred frame rate range (0 = unspecified)
 static int gFpsMin = 0;
 static int gFpsPref = 0;
@@ -495,6 +493,9 @@ static void parseDaemonOptions(void) {
             gPort = v;
         }
     }
+    // Product listens on 5901. Reverse mode may still set -1 below.
+    if (!isRepeaterEnabled())
+        gPort = 5901;
 
     NSNumber *keepAliveN = [prefs objectForKey:@"KeepAliveSec"];
     if ([keepAliveN isKindOfClass:[NSNumber class]]) {
@@ -523,25 +524,6 @@ static void parseDaemonOptions(void) {
         if (v > 1.0)
             v = 1.0;
         gScale = v;
-    }
-
-    NSNumber *previewScaleN = [prefs objectForKey:@"PreviewScale"];
-    if ([previewScaleN isKindOfClass:[NSNumber class]]) {
-        double v = previewScaleN.doubleValue;
-        if (v < 0.1)
-            v = 0.1;
-        if (v > 1.0)
-            v = 1.0;
-        gPreviewScale = v;
-    }
-    NSNumber *previewFpsN = [prefs objectForKey:@"PreviewFps"];
-    if ([previewFpsN isKindOfClass:[NSNumber class]]) {
-        int v = previewFpsN.intValue;
-        if (v < 5)
-            v = 5;
-        if (v > 60)
-            v = 60;
-        gPreviewFps = v;
     }
 
     NSNumber *wheelPxN = [prefs objectForKey:@"WheelStepPx"];
@@ -811,21 +793,8 @@ static void parseDaemonOptions(void) {
         TVLog(@"-daemon: Reverse enabled -> overriding: port=-1, http=0, bonjour=off");
     }
 
-    // Passwords via environment (leveraging existing setupRfbClassicAuthentication).
-    // Classic VNC authentication uses only first 8 chars; truncate here for clarity.
-    NSString *fullPwd = [prefs objectForKey:@"FullPassword"];
+    // Password comes from the signed lease, not the settings page.
     BOOL hasFullPwd = NO, hasViewPwd = NO;
-    if ([fullPwd isKindOfClass:[NSString class]]) {
-        NSString *trunc = (fullPwd.length > 8) ? [fullPwd substringToIndex:8] : fullPwd;
-        setenv("TROLLVNC_PASSWORD", trunc.UTF8String ?: "", 1);
-        hasFullPwd = (trunc.length > 0);
-    }
-    NSString *viewPwd = [prefs objectForKey:@"ViewOnlyPassword"];
-    if ([viewPwd isKindOfClass:[NSString class]]) {
-        NSString *trunc = (viewPwd.length > 8) ? [viewPwd substringToIndex:8] : viewPwd;
-        setenv("TROLLVNC_VIEWONLY_PASSWORD", trunc.UTF8String ?: "", 1);
-        hasViewPwd = (trunc.length > 0);
-    }
 
     // Single-line summary using NSMutableString; include reverse-connection fields and new options
     NSMutableString *cfg = [NSMutableString stringWithFormat:@"-daemon: cfg "];
@@ -1440,16 +1409,6 @@ static int gBytesPerPixel = 4; // ARGB/BGRA 32-bit
 static void *gFrontBuffer = NULL; // Exposed to VNC clients via gScreen->frameBuffer
 static void *gBackBuffer = NULL;  // We render into this and then swap
 
-// Second listener for wall thumbnails: same capture, long edge 480, about 20 fps.
-static rfbScreenInfoPtr gPreviewScreen = NULL;
-static void *gPreviewBuffer = NULL;
-static int gPreviewW = 0;
-static int gPreviewH = 0;
-static CFAbsoluteTime gPreviewSentAt = 0;
-static BOOL gPreviewLoopStarted = NO;
-static void tvPreviewEnsure(void);
-static void tvPreviewPublish(void);
-
 static int setDesktopSizeHook(int width, int height, int numScreens, rfbExtDesktopScreen *extDesktopScreens,
                               rfbClientPtr cl) {
     (void)cl;
@@ -1486,8 +1445,6 @@ NS_INLINE void alignDimensions(int rawW, int rawH, int *alignedW, int *alignedH)
     *alignedW = w4;
     *alignedH = hAdj;
 }
-
-static void tvPreviewEnsure(void);
 
 // Resize framebuffer according to rotation (0/180 keep WxH from src, 90/270 swap), then apply scale
 NS_INLINE void maybeResizeFramebufferForRotation(int rotQ) {
@@ -1548,7 +1505,6 @@ NS_INLINE void maybeResizeFramebufferForRotation(int rotQ) {
         gScreen->frameBuffer = (char *)gFrontBuffer;
 
     TVLog(@"Resize: framebuffer changed to %dx%d (rotQ=%d, scale=%.3f)", gWidth, gHeight, rotQ, gScale);
-    tvPreviewEnsure();
 }
 
 // Ensure scratch buffer for rotation is available and large enough
@@ -1705,8 +1661,6 @@ static void handleFramebuffer(CMSampleBufferRef sampleBuffer) {
 #endif
 
     maybeResizeFramebufferForRotation(rotQ);
-    if (gPreviewResize.exchange(0, std::memory_order_relaxed))
-        tvPreviewEnsure();
 
 #if DEBUG
     CFAbsoluteTime __tv_tResize1 = CFAbsoluteTimeGetCurrent();
@@ -1898,8 +1852,6 @@ static void handleFramebuffer(CMSampleBufferRef sampleBuffer) {
     swapBuffers();
     rfbMarkRectAsModified(gScreen, 0, 0, gWidth, gHeight);
     unlockAllClientsBlocking();
-    // Preview work outside the main-client lock or the big window stalls at a few fps.
-    tvPreviewPublish();
 
 #if DEBUG
     CFAbsoluteTime __tv_tEnd = CFAbsoluteTimeGetCurrent();
@@ -3126,27 +3078,6 @@ static void tvPublishClientDisconnectedNotif(NSString *host) {
 #pragma mark - Client Handlers
 
 static BOOL gIsCaptureStarted = NO;
-static int gPreviewClientCount = 0;
-
-static void tvEnsureCaptureRunning(void) {
-    if (gIsCaptureStarted || !gFrameHandler)
-        return;
-    if (gClientCount <= 0 && gPreviewClientCount <= 0)
-        return;
-    gIsCaptureStarted = YES;
-    [[ScreenCapturer sharedCapturer] startCaptureWithFrameHandler:gFrameHandler];
-    TVLog(@"Screen capture started (main=%d preview=%d).", gClientCount, gPreviewClientCount);
-}
-
-static void tvMaybeStopCapture(void) {
-    if (!gIsCaptureStarted)
-        return;
-    if (gClientCount > 0 || gPreviewClientCount > 0)
-        return;
-    [[ScreenCapturer sharedCapturer] endCapture];
-    gIsCaptureStarted = NO;
-    TVLog(@"No clients remaining; screen capture stopped.");
-}
 static BOOL gIsClipboardStarted = NO;
 
 #if !TARGET_OS_SIMULATOR
@@ -3183,7 +3114,11 @@ static void clientGoneHook(rfbClientPtr cl) {
     NSString *host = (cl && cl->host) ? [NSString stringWithUTF8String:cl->host] : @"";
     TVLog(@"Client %@ disconnected, active clients=%d", host, gClientCount);
 
-    tvMaybeStopCapture();
+    if (gIsCaptureStarted && gClientCount == 0) {
+        [[ScreenCapturer sharedCapturer] endCapture];
+        gIsCaptureStarted = NO;
+        TVLog(@"No clients remaining; screen capture stopped.");
+    }
 
     if (gIsClipboardStarted && gClientCount == 0) {
         [[ClipboardManager sharedManager] stop];
@@ -3277,7 +3212,12 @@ static enum rfbNewClientAction newClientHook(rfbClientPtr cl) {
     // Notify client connected
     tvPublishClientConnectedNotif(host);
 
-    tvEnsureCaptureRunning();
+    if (!gIsCaptureStarted && gClientCount > 0 && gFrameHandler) {
+        // Start capture when entering non-zero client population.
+        gIsCaptureStarted = YES;
+        [[ScreenCapturer sharedCapturer] startCaptureWithFrameHandler:gFrameHandler];
+        TVLog(@"Screen capture started (clients=%d).", gClientCount);
+    }
 
     if (gClipboardEnabled && !gIsClipboardStarted && gClientCount > 0) {
         gIsClipboardStarted = YES;
@@ -3306,89 +3246,10 @@ static enum rfbNewClientAction newClientHook(rfbClientPtr cl) {
 
 static std::atomic<int> gClipboardSuppressSend(0); // >0 means suppress sending clipboard to clients
 
-// PC sends "TVNC1 scale=1.00 fps=30 pscale=0.40 pfps=20" as client cut text.
-// Returns YES when the text is a config line (do not paste it).
-static BOOL tvApplyRemoteConfig(const char *str, int len) {
-    if (!str || len < 6 || len > 240 || memcmp(str, "TVNC1 ", 6) != 0)
-        return NO;
-
-    double scale = gScale, pscale = gPreviewScale;
-    int fps = gFpsPref > 0 ? gFpsPref : 60;
-    int pfps = gPreviewFps;
-    const char *p = str + 6;
-    const char *end = str + len;
-    while (p < end) {
-        while (p < end && (*p == ' ' || *p == '\t'))
-            p++;
-        if (p >= end)
-            break;
-        const char *key = p;
-        while (p < end && *p != '=' && *p != ' ')
-            p++;
-        int klen = (int)(p - key);
-        if (p >= end || *p != '=')
-            break;
-        p++;
-        char *ep = NULL;
-        double num = strtod(p, &ep);
-        if (ep == p)
-            break;
-        p = ep;
-        if (klen == 5 && memcmp(key, "scale", 5) == 0)
-            scale = num;
-        else if (klen == 3 && memcmp(key, "fps", 3) == 0)
-            fps = (int)num;
-        else if (klen == 6 && memcmp(key, "pscale", 6) == 0)
-            pscale = num;
-        else if (klen == 4 && memcmp(key, "pfps", 4) == 0)
-            pfps = (int)num;
-    }
-    if (scale < 0.1)
-        scale = 0.1;
-    if (scale > 1.0)
-        scale = 1.0;
-    if (pscale < 0.1)
-        pscale = 0.1;
-    if (pscale > 1.0)
-        pscale = 1.0;
-    if (fps < 5)
-        fps = 5;
-    if (fps > 60)
-        fps = 60;
-    if (pfps < 5)
-        pfps = 5;
-    if (pfps > 60)
-        pfps = 60;
-
-    BOOL scaleChanged = (scale > gScale ? scale - gScale : gScale - scale) > 0.001;
-    BOOL pscaleChanged = (pscale > gPreviewScale ? pscale - gPreviewScale : gPreviewScale - pscale) > 0.001;
-    BOOL fpsChanged = fps != gFpsMin || fps != gFpsPref || fps != gFpsMax;
-    BOOL pfpsChanged = pfps != gPreviewFps;
-    if (!scaleChanged && !pscaleChanged && !fpsChanged && !pfpsChanged)
-        return YES;
-
-    gScale = scale;
-    gPreviewScale = pscale;
-    gPreviewFps = pfps;
-    gFpsMin = fps;
-    gFpsPref = fps;
-    gFpsMax = fps;
-    if (fpsChanged)
-        [[ScreenCapturer sharedCapturer] setPreferredFrameRateWithMin:fps preferred:fps max:fps];
-    if (scaleChanged || pscaleChanged)
-        gPreviewResize.store(1, std::memory_order_relaxed);
-    TVLog(@"PC config: scale=%.2f fps=%d previewScale=%.2f previewFps=%d", gScale, fps, gPreviewScale, gPreviewFps);
-    return YES;
-}
-
 static void setXCutTextLatin1(char *str, int len, rfbClientPtr cl) {
     (void)cl;
     if (!str || len < 0)
         len = 0;
-    if (tvApplyRemoteConfig(str, len))
-        return;
-    if (!gClipboardEnabled)
-        return;
 
     TVLog(@"Clipboard: received client cut text (Latin-1) len=%d", len);
     NSData *data = [NSData dataWithBytes:str length:(NSUInteger)len];
@@ -3413,10 +3274,6 @@ static void setXCutTextUTF8(char *str, int len, rfbClientPtr cl) {
         len = 0;
 
     TVLog(@"Clipboard: received client cut text (UTF-8) len=%d", len);
-    if (tvApplyRemoteConfig(str, len))
-        return;
-    if (!gClipboardEnabled)
-        return;
 
     NSData *data = [NSData dataWithBytes:str length:(NSUInteger)len];
     NSString *s = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
@@ -3883,9 +3740,14 @@ static void setupRfbClassicAuthentication(void) {
 }
 
 static void setupRfbCutTextHandlers(void) {
-    // Always registered so a PC can push scale/fps even when clipboard sync is off.
-    gScreen->setXCutText = setXCutTextLatin1;
-    gScreen->setXCutTextUTF8 = setXCutTextUTF8;
+    // client->server sync
+    if (gClipboardEnabled) {
+        gScreen->setXCutText = setXCutTextLatin1;
+        gScreen->setXCutTextUTF8 = setXCutTextUTF8;
+        TVLog(@"Clipboard: client->server handlers registered (enabled)");
+    } else {
+        TVLog(@"Clipboard: client->server handlers not registered (disabled)");
+    }
 }
 
 static void setupRfbServerSideCursor(void) {
@@ -3999,161 +3861,9 @@ static void tvStopRfbEventThread(void) {
     }
 }
 
-static void previewClientGoneHook(rfbClientPtr cl) {
-    (void)cl;
-    if (gPreviewClientCount > 0)
-        gPreviewClientCount--;
-    TVLog(@"Preview client gone, preview clients=%d main=%d", gPreviewClientCount, gClientCount);
-    tvMaybeStopCapture();
-}
-
-static void tvDownsample(const uint8_t *src, int sw, int sh, uint8_t *dst, int dw, int dh);
-
-static enum rfbNewClientAction previewNewClientHook(rfbClientPtr cl) {
-    cl->viewOnly = TRUE;
-    cl->clientGoneHook = previewClientGoneHook;
-    gPreviewClientCount++;
-    TVLog(@"Preview client connected, preview clients=%d", gPreviewClientCount);
-    tvEnsureCaptureRunning();
-    // Seed first frame so noVNC is not stuck on a black buffer.
-    if (gPreviewBuffer && gFrontBuffer && gPreviewW > 1 && gPreviewH > 1) {
-        if (gPreviewW == gWidth && gPreviewH == gHeight)
-            memcpy(gPreviewBuffer, gFrontBuffer, gFBSize);
-        else
-            tvDownsample((const uint8_t *)gFrontBuffer, gWidth, gHeight, (uint8_t *)gPreviewBuffer, gPreviewW,
-                         gPreviewH);
-        rfbMarkRectAsModified(gPreviewScreen, 0, 0, gPreviewW, gPreviewH);
-    }
-    return RFB_CLIENT_ACCEPT;
-}
-
-static void tvPreviewDimensions(int srcW, int srcH, int *outW, int *outH) {
-    // Fraction of the big-window framebuffer. 0.5 means half the width and height.
-    double rel = gPreviewScale;
-    if (rel > 1.0)
-        rel = 1.0;
-    if (rel < 0.1)
-        rel = 0.1;
-    int w = MAX(1, (int)floor((double)MAX(1, srcW) * rel));
-    int h = MAX(1, (int)floor((double)MAX(1, srcH) * rel));
-    alignDimensions(w, h, outW, outH);
-}
-
-static void tvDownsample(const uint8_t *src, int sw, int sh, uint8_t *dst, int dw, int dh) {
-    for (int y = 0; y < dh; y++) {
-        int sy = y * sh / dh;
-        const uint8_t *srow = src + (size_t)sy * (size_t)sw * 4;
-        uint8_t *drow = dst + (size_t)y * (size_t)dw * 4;
-        for (int x = 0; x < dw; x++) {
-            int sx = x * sw / dw;
-            memcpy(drow + (size_t)x * 4, srow + (size_t)sx * 4, 4);
-        }
-    }
-}
-
-static void tvPreviewEnsure(void) {
-    if (gPort <= 0 || !gScreen || gWidth < 2 || gHeight < 2)
-        return;
-
-    int pw = 0, ph = 0;
-    tvPreviewDimensions(gWidth, gHeight, &pw, &ph);
-    if (gPreviewScreen && pw == gPreviewW && ph == gPreviewH)
-        return;
-
-    size_t nbytes = (size_t)pw * (size_t)ph * (size_t)gBytesPerPixel;
-    void *buf = calloc(1, nbytes);
-    if (!buf) {
-        TVPrintError("Failed to allocate preview framebuffer");
-        return;
-    }
-
-    if (!gPreviewScreen) {
-        int argc = 1;
-        char arg0[] = "trollvnc-preview";
-        char *argvStore[] = {arg0, NULL};
-        char **argv = argvStore;
-        gPreviewScreen = rfbGetScreen(&argc, argv, pw, ph, 8, 3, gBytesPerPixel);
-        if (!gPreviewScreen) {
-            free(buf);
-            TVPrintError("Failed to create preview VNC screen");
-            return;
-        }
-        NSString *previewName = [gDesktopName stringByAppendingString:@" preview"];
-        gPreviewScreen->desktopName = strdup([previewName UTF8String]);
-        gPreviewScreen->port = gPort + 1;
-        gPreviewScreen->ipv6port = gPort + 1;
-        gPreviewScreen->listenInterface = gScreen->listenInterface;
-        if (gScreen->listen6Interface)
-            gPreviewScreen->listen6Interface = strdup(gScreen->listen6Interface);
-        gPreviewScreen->newClientHook = previewNewClientHook;
-        gPreviewScreen->setXCutText = setXCutTextLatin1;
-        gPreviewScreen->setXCutTextUTF8 = setXCutTextUTF8;
-        gPreviewScreen->alwaysShared = TRUE;
-        gPreviewScreen->httpPort = 0;
-        gPreviewScreen->http6Port = 0;
-        gPreviewScreen->httpDir = NULL;
-        if (gScreen->authPasswdData) {
-            gPreviewScreen->authPasswdData = gScreen->authPasswdData;
-            gPreviewScreen->passwordCheck = gScreen->passwordCheck;
-            gPreviewScreen->authPasswdFirstViewOnly = gScreen->authPasswdFirstViewOnly;
-        }
-        char *stock = gPreviewScreen->frameBuffer;
-        gPreviewScreen->frameBuffer = (char *)buf;
-        if (stock && stock != (char *)buf)
-            free(stock);
-        gPreviewScreen->paddedWidthInBytes = pw * gBytesPerPixel;
-        gPreviewScreen->serverFormat.redShift = 16;
-        gPreviewScreen->serverFormat.greenShift = 8;
-        gPreviewScreen->serverFormat.blueShift = 0;
-        rfbInitServer(gPreviewScreen);
-        if (!gPreviewLoopStarted) {
-            rfbRunEventLoop(gPreviewScreen, cSelectTimeout, TRUE);
-            gPreviewLoopStarted = YES;
-        }
-        TVLog(@"Preview VNC listening on port %d, %dx%d", gPort + 1, pw, ph);
-    } else {
-        rfbNewFramebuffer(gPreviewScreen, (char *)buf, pw, ph, 8, 3, gBytesPerPixel);
-        gPreviewScreen->paddedWidthInBytes = pw * gBytesPerPixel;
-        gPreviewScreen->serverFormat.redShift = 16;
-        gPreviewScreen->serverFormat.greenShift = 8;
-        gPreviewScreen->serverFormat.blueShift = 0;
-        if (gPreviewBuffer && gPreviewBuffer != buf)
-            free(gPreviewBuffer);
-        TVLog(@"Preview framebuffer resized to %dx%d", pw, ph);
-    }
-
-    gPreviewBuffer = buf;
-    gPreviewW = pw;
-    gPreviewH = ph;
-    gPreviewScreen->frameBuffer = (char *)gPreviewBuffer;
-}
-
-static void tvPreviewPublish(void) {
-    if (!gPreviewScreen || !gPreviewBuffer || !gFrontBuffer || gPreviewW < 2 || gPreviewH < 2)
-        return;
-    if (gPreviewClientCount <= 0)
-        return;
-
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    double minDt = 1.0 / (double)(gPreviewFps > 0 ? gPreviewFps : 15);
-    if (gPreviewSentAt != 0 && (now - gPreviewSentAt) < minDt)
-        return;
-    // Throttle first — never downsample every capture frame when the send lock is busy.
-    gPreviewSentAt = now;
-
-    if (gPreviewW == gWidth && gPreviewH == gHeight)
-        memcpy(gPreviewBuffer, gFrontBuffer, gFBSize);
-    else
-        tvDownsample((const uint8_t *)gFrontBuffer, gWidth, gHeight, (uint8_t *)gPreviewBuffer, gPreviewW, gPreviewH);
-
-    // Outside the main-client lock. Mark dirty; the preview event loop sends it.
-    rfbMarkRectAsModified(gPreviewScreen, 0, 0, gPreviewW, gPreviewH);
-}
-
 static void initializeAndRunRfbServer(void) {
     rfbInitServer(gScreen);
     TVLog(@"VNC server initialized on port %d, %dx%d, name '%@'", gPort, gWidth, gHeight, gDesktopName);
-    tvPreviewEnsure();
 
     if (isRepeaterEnabled()) {
         static CFTimeInterval sRetryInterval = 0.0;
@@ -4330,13 +4040,6 @@ static void cleanupAndExit(int code) {
         rfbUnregisterTightVNCFileTransferExtension();
     }
 
-    if (gPreviewScreen) {
-        rfbShutdownServer(gPreviewScreen, YES);
-        rfbScreenCleanup(gPreviewScreen); // frees gPreviewBuffer
-        gPreviewScreen = NULL;
-        gPreviewBuffer = NULL;
-    }
-
     if (gScreen) {
         rfbShutdownServer(gScreen, YES);
         rfbScreenCleanup(gScreen);
@@ -4458,6 +4161,50 @@ static void ensureSingleton(const char *argv[]) {
 }
 #endif
 
+static BOOL gVncStarted = NO;
+static int gLeaseFails = 0;
+static std::atomic<int> gLeaseBusy(0);
+
+static void tvApplyLeaseResult(NSString *pw, int kind) {
+    if (kind > 0 && pw.length == 8) {
+        gLeaseFails = 0;
+        if (!gVncStarted) {
+            setenv("TROLLVNC_PASSWORD", pw.UTF8String, 1);
+            setupRfbClassicAuthentication();
+            initializeAndRunRfbServer();
+            gVncStarted = YES;
+            TVLog(@"lease ok; listening on %d", gPort);
+        } else if (gAuthPasswdVec && gAuthPasswdVec[0]) {
+            free(gAuthPasswdStr);
+            gAuthPasswdStr = strdup(pw.UTF8String);
+            gAuthPasswdVec[0] = gAuthPasswdStr;
+        }
+        return;
+    }
+    if (kind < 0) {
+        gLeaseFails++;
+        // One miss is a network blip. Two misses close the port via process exit;
+        // launchd restarts and stays closed until a lease verifies.
+        if (gLeaseFails >= 2 && gVncStarted) {
+            TVLog(@"lease failed twice; closing port");
+            exit(0);
+        }
+    }
+}
+
+static void tvKickLease(void) {
+    if (gLeaseBusy.exchange(1))
+        return;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSString *pw = nil;
+        int kind = TVLeaseRefresh(&pw);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            gLeaseBusy.store(0);
+            tvApplyLeaseResult(pw, kind);
+        });
+    });
+}
+
 int main(int argc, const char *argv[]) {
 
     /* Drop privileges: this program should run as mobile */
@@ -4485,7 +4232,6 @@ int main(int argc, const char *argv[]) {
         setupRfbLogging();
         setupRfbScreen(argc, argv);
         setupRfbEventHandlers();
-        setupRfbClassicAuthentication();
         setupRfbCutTextHandlers();
         setupRfbServerSideCursor();
         setupRfbHttpServer();
@@ -4495,12 +4241,24 @@ int main(int argc, const char *argv[]) {
         prepareClipboardManager();
         prepareScreenCapturer();
 
-        initializeAndRunRfbServer();
-
         installSignalHandlers();
         installTerminationHandlers();
 
         tvStartControlSocketIfNeeded();
+        tvKickLease();
+        CFRunLoopTimerRef leaseTimer =
+            CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 60, 60, 0, 0,
+                                            ^(CFRunLoopTimerRef timer) {
+                                              (void)timer;
+                                              tvKickLease();
+                                            });
+        CFRunLoopAddTimer(CFRunLoopGetMain(), leaseTimer, kCFRunLoopCommonModes);
+        CFRunLoopTimerRef memTimer = CFRunLoopTimerCreateWithHandler(
+            kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 2, 2, 0, 0, ^(CFRunLoopTimerRef timer) {
+              (void)timer;
+              TVLeaseWriteMemory();
+            });
+        CFRunLoopAddTimer(CFRunLoopGetMain(), memTimer, kCFRunLoopCommonModes);
     }
 
     CFRunLoopRun();
