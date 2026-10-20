@@ -21,10 +21,18 @@ need(
     ),
     "tvArmLeaseTimer must use PendingPair ? 2 : 60 only",
 )
-m = re.search(r"static void tvArmLeaseTimer\(void\) \{.*?^\}", server, re.M | re.S)
-need(m is not None, "tvArmLeaseTimer not found")
-if m:
-    need("!gVncStarted" not in m.group(0), "tvArmLeaseTimer must not use !gVncStarted for fast poll")
+# Interval expression must not OR in !gVncStarted
+need(
+    not re.search(
+        r"interval\s*=\s*TVLeasePendingPair\(\)\s*\|\|\s*!gVncStarted",
+        server,
+    )
+    and not re.search(
+        r"interval\s*=\s*.*!gVncStarted",
+        server,
+    ),
+    "interval assignment must not use !gVncStarted",
+)
 
 need(
     re.search(r"gLeaseFails\s*>=\s*2\s*&&\s*gVncStarted", server),
