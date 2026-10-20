@@ -1,4 +1,5 @@
 #import "LeaseGate.h"
+#import "BulletinManager.h"
 
 #import <mach/mach.h>
 #import <openssl/evp.h>
@@ -21,6 +22,14 @@ static void TVSetPref(NSString *key, id value) {
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value,
                              (__bridge CFStringRef)kDom);
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDom);
+}
+
+static void TVPairBanner(NSString *msg) {
+    if (![msg isKindOfClass:[NSString class]] || msg.length == 0)
+        return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[BulletinManager sharedManager] popBannerWithContent:msg userInfo:nil];
+    });
 }
 
 static NSData *TVB64URL(NSString *text) {
@@ -99,10 +108,13 @@ int TVLeaseRefresh(NSString *__autoreleasing *outPassword) {
         NSInteger status = 0;
         NSDictionary *resp = TVPost(@"/api/device/pair", @{@"code" : code}, &status);
         NSString *got = resp[@"deviceToken"];
-        if (status != 200 || ![got isKindOfClass:[NSString class]] || got.length < 16)
+        if (status != 200 || ![got isKindOfClass:[NSString class]] || got.length < 16) {
+            TVPairBanner(@"配对失败，请检查配对码后重试");
             return -1;
+        }
         TVSetPref(@"DeviceToken", got);
         TVSetPref(@"PairCode", @"");
+        TVPairBanner(@"配对成功");
         token = got;
     }
     NSInteger status = 0;

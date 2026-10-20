@@ -12,7 +12,7 @@
 			<key>label</key>
 			<string>服务</string>
 			<key>footerText</key>
-			<string>默认端口 5908，可改。电脑添加/扫描/USB 须用同一端口。配对码填一次即可。</string>
+			<string>默认端口 5908，可改。电脑添加/扫描/USB 须用同一端口。配对码填好后退出设置，约一分钟内生效；成功会弹通知并清空配对码。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
