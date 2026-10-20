@@ -68,7 +68,7 @@
 int gOrientationFixQuad = 0; // 0=0°, 1=90°CW, 2=180°, 3=270°CW
 
 static BOOL gEnabled = YES;
-static int gPort = 5901;
+static int gPort = 5908;
 static int gTvCtlPort = 0;        // port for control connections (0 = disabled)
 static NSString *gBindHost = nil; // optional bind address from CLI/config
 static NSString *gDesktopName = @"IOS 云控基座";
@@ -487,16 +487,12 @@ static void parseDaemonOptions(void) {
         int v = portN.intValue;
         if (v < 1024 || v > 65535) {
             // Privileged or invalid -> fallback to default 5901
-            TVLog(@"-daemon: invalid TCP Port=%d; using default 5901", v);
-            gPort = 5901;
+            TVLog(@"-daemon: invalid TCP Port=%d; using default 5908", v);
+            gPort = 5908;
         } else {
             gPort = v;
         }
     }
-    // Product listens on 5901. Reverse mode may still set -1 below.
-    if (!isRepeaterEnabled())
-        gPort = 5901;
-
     NSNumber *keepAliveN = [prefs objectForKey:@"KeepAliveSec"];
     if ([keepAliveN isKindOfClass:[NSNumber class]]) {
         double v = keepAliveN.doubleValue;

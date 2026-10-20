@@ -12,7 +12,7 @@
 			<key>label</key>
 			<string>服务</string>
 			<key>footerText</key>
-			<string>端口固定 5901。电脑登录后把配对码填在这里，只需一次。</string>
+			<string>默认端口 5908，可改。电脑添加/扫描/USB 须用同一端口。配对码填一次即可。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -32,6 +32,24 @@
 			<key>defaults</key>
 			<string>com.82flex.trollvnc</string>
 			<key>key</key>
+			<string>Port</string>
+			<key>label</key>
+			<string>端口</string>
+			<key>default</key>
+			<integer>5908</integer>
+			<key>isNumeric</key>
+			<true/>
+			<key>noAutoCorrect</key>
+			<true/>
+			<key>placeholder</key>
+			<string>5908</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSEditTextCell</string>
+			<key>defaults</key>
+			<string>com.82flex.trollvnc</string>
+			<key>key</key>
 			<string>PairCode</string>
 			<key>label</key>
 			<string>配对码</string>
@@ -40,6 +58,18 @@
 			<key>isNumeric</key>
 			<true/>
 			<key>noAutoCorrect</key>
+			<true/>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>defaults</key>
+			<string>com.82flex.trollvnc</string>
+			<key>key</key>
+			<string>ClientNotifsEnabled</string>
+			<key>label</key>
+			<string>连接/断开通知</string>
+			<key>default</key>
 			<true/>
 		</dict>
 		<dict>
