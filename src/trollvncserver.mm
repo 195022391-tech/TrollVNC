@@ -4197,6 +4197,26 @@ static void tvApplyLeaseResult(NSString *pw, int kind) {
     }
 }
 
+static CFRunLoopTimerRef gLeaseTimer = NULL;
+static void tvKickLease(void);
+
+static void tvArmLeaseTimer(void) {
+    BOOL fast = TVLeasePendingPair() || !gVncStarted;
+    CFTimeInterval interval = fast ? 2.0 : 60.0;
+    if (gLeaseTimer) {
+        CFRunLoopTimerInvalidate(gLeaseTimer);
+        CFRelease(gLeaseTimer);
+        gLeaseTimer = NULL;
+    }
+    gLeaseTimer = CFRunLoopTimerCreateWithHandler(
+        kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + interval, interval, 0, 0,
+        ^(CFRunLoopTimerRef timer) {
+          (void)timer;
+          tvKickLease();
+        });
+    CFRunLoopAddTimer(CFRunLoopGetMain(), gLeaseTimer, kCFRunLoopCommonModes);
+}
+
 static void tvKickLease(void) {
     if (gLeaseBusy.exchange(1))
         return;
@@ -4206,6 +4226,7 @@ static void tvKickLease(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             gLeaseBusy.store(0);
             tvApplyLeaseResult(pw, kind);
+            tvArmLeaseTimer();
         });
     });
 }
@@ -4251,13 +4272,7 @@ int main(int argc, const char *argv[]) {
 
         tvStartControlSocketIfNeeded();
         tvKickLease();
-        CFRunLoopTimerRef leaseTimer =
-            CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 60, 60, 0, 0,
-                                            ^(CFRunLoopTimerRef timer) {
-                                              (void)timer;
-                                              tvKickLease();
-                                            });
-        CFRunLoopAddTimer(CFRunLoopGetMain(), leaseTimer, kCFRunLoopCommonModes);
+        tvArmLeaseTimer();
         CFRunLoopTimerRef memTimer = CFRunLoopTimerCreateWithHandler(
             kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 2, 2, 0, 0, ^(CFRunLoopTimerRef timer) {
               (void)timer;

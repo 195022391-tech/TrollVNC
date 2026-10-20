@@ -86,6 +86,14 @@ static BOOL TVVerify(NSData *payload, NSData *sig) {
     return ok;
 }
 
+BOOL TVLeasePendingPair(void) {
+    NSString *token = TVPref(@"DeviceToken");
+    if ([token isKindOfClass:[NSString class]] && token.length >= 16)
+        return NO;
+    NSString *code = TVPref(@"PairCode");
+    return [code isKindOfClass:[NSString class]] && code.length >= 4;
+}
+
 void TVLeaseWriteMemory(void) {
     struct task_basic_info info;
     mach_msg_type_number_t count = TASK_BASIC_INFO_COUNT;
