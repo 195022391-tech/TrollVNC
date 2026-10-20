@@ -4201,8 +4201,10 @@ static CFRunLoopTimerRef gLeaseTimer = NULL;
 static void tvKickLease(void);
 
 static void tvArmLeaseTimer(void) {
-    BOOL fast = TVLeasePendingPair() || !gVncStarted;
-    CFTimeInterval interval = fast ? 2.0 : 60.0;
+    // Fast poll only while redeeming a pair code. After DeviceToken exists
+    // (VNC up or waiting), stay at 60s so two lease misses ≈ 2 min — same
+    // disconnect budget as before. Do not tie fast poll to !gVncStarted.
+    CFTimeInterval interval = TVLeasePendingPair() ? 2.0 : 60.0;
     if (gLeaseTimer) {
         CFRunLoopTimerInvalidate(gLeaseTimer);
         CFRelease(gLeaseTimer);

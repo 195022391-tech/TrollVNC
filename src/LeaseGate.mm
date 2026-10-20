@@ -24,12 +24,22 @@ static void TVSetPref(NSString *key, id value) {
     CFPreferencesAppSynchronize((__bridge CFStringRef)kDom);
 }
 
+static CFAbsoluteTime sPairFailBannerAt = 0;
+
 static void TVPairBanner(NSString *msg) {
     if (![msg isKindOfClass:[NSString class]] || msg.length == 0)
         return;
     dispatch_async(dispatch_get_main_queue(), ^{
         [[BulletinManager sharedManager] popBannerWithContent:msg userInfo:nil];
     });
+}
+
+static void TVPairFailBanner(void) {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - sPairFailBannerAt < 20)
+        return;
+    sPairFailBannerAt = now;
+    TVPairBanner(@"配对失败，请检查配对码后重试");
 }
 
 static NSData *TVB64URL(NSString *text) {
@@ -117,7 +127,7 @@ int TVLeaseRefresh(NSString *__autoreleasing *outPassword) {
         NSDictionary *resp = TVPost(@"/api/device/pair", @{@"code" : code}, &status);
         NSString *got = resp[@"deviceToken"];
         if (status != 200 || ![got isKindOfClass:[NSString class]] || got.length < 16) {
-            TVPairBanner(@"配对失败，请检查配对码后重试");
+            TVPairFailBanner();
             return -1;
         }
         TVSetPref(@"DeviceToken", got);
