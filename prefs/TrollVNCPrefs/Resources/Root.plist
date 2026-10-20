@@ -12,7 +12,7 @@
 			<key>label</key>
 			<string>服务</string>
 			<key>footerText</key>
-			<string>默认端口 5908，可改。电脑添加/扫描/USB 须用同一端口。配对码填好后退出设置，几秒内会配对；成功会弹通知并清空配对码。</string>
+			<string>默认端口 5908，可改。电脑添加/扫描/USB 须用同一端口。填云控账号和密码后退出设置，几秒内绑定；成功会弹通知。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -50,12 +50,26 @@
 			<key>defaults</key>
 			<string>com.82flex.trollvnc</string>
 			<key>key</key>
-			<string>PairCode</string>
+			<string>Account</string>
 			<key>label</key>
-			<string>配对码</string>
+			<string>云控账号</string>
 			<key>placeholder</key>
-			<string>电脑上显示的 6 位数字</string>
-			<key>isNumeric</key>
+			<string>与电脑登录同一账号</string>
+			<key>noAutoCorrect</key>
+			<true/>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSEditTextCell</string>
+			<key>defaults</key>
+			<string>com.82flex.trollvnc</string>
+			<key>key</key>
+			<string>Password</string>
+			<key>label</key>
+			<string>云控密码</string>
+			<key>placeholder</key>
+			<string>与电脑登录同一密码</string>
+			<key>isSecure</key>
 			<true/>
 			<key>noAutoCorrect</key>
 			<true/>

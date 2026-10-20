@@ -39,7 +39,7 @@ static void TVPairFailBanner(void) {
     if (now - sPairFailBannerAt < 20)
         return;
     sPairFailBannerAt = now;
-    TVPairBanner(@"配对失败，请检查配对码后重试");
+    TVPairBanner(@"登录失败，请检查账号密码后重试");
 }
 
 static NSData *TVB64URL(NSString *text) {
@@ -100,8 +100,10 @@ BOOL TVLeasePendingPair(void) {
     NSString *token = TVPref(@"DeviceToken");
     if ([token isKindOfClass:[NSString class]] && token.length >= 16)
         return NO;
-    NSString *code = TVPref(@"PairCode");
-    return [code isKindOfClass:[NSString class]] && code.length >= 4;
+    NSString *user = TVPref(@"Account");
+    NSString *pass = TVPref(@"Password");
+    return [user isKindOfClass:[NSString class]] && user.length >= 1 &&
+           [pass isKindOfClass:[NSString class]] && pass.length >= 1;
 }
 
 void TVLeaseWriteMemory(void) {
@@ -120,19 +122,21 @@ int TVLeaseRefresh(NSString *__autoreleasing *outPassword) {
     TVLeaseWriteMemory();
     NSString *token = TVPref(@"DeviceToken");
     if (![token isKindOfClass:[NSString class]] || token.length < 16) {
-        NSString *code = TVPref(@"PairCode");
-        if (![code isKindOfClass:[NSString class]] || code.length < 4)
+        NSString *user = TVPref(@"Account");
+        NSString *pass = TVPref(@"Password");
+        if (![user isKindOfClass:[NSString class]] || user.length < 1 ||
+            ![pass isKindOfClass:[NSString class]] || pass.length < 1)
             return 0;
         NSInteger status = 0;
-        NSDictionary *resp = TVPost(@"/api/device/pair", @{@"code" : code}, &status);
+        NSDictionary *resp =
+            TVPost(@"/api/device/login", @{@"username" : user, @"password" : pass}, &status);
         NSString *got = resp[@"deviceToken"];
         if (status != 200 || ![got isKindOfClass:[NSString class]] || got.length < 16) {
             TVPairFailBanner();
             return -1;
         }
         TVSetPref(@"DeviceToken", got);
-        TVSetPref(@"PairCode", @"");
-        TVPairBanner(@"配对成功");
+        TVPairBanner(@"登录成功");
         token = got;
     }
     NSInteger status = 0;
